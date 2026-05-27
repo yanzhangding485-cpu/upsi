@@ -1,0 +1,24 @@
+load("//bazel:yacl.bzl", "AES_COPT_FLAGS")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "upsu",
+    srcs = [
+        "upsu.h",
+        "upsu.cc",
+        "main.cc",
+    ],
+    deps = [
+        "//yacl/link",
+        "//examples/upsi/rr22/okvs:baxos",
+        "//examples/upsi/rr22:rr22",
+        "//examples/upsi/psu:psu",
+        "//yacl/base:int128",
+        "//yacl/crypto/hash:blake3",
+        "//yacl/utils:parallel",
+        "//yacl/crypto/hash:hash_utils",
+        "//yacl/crypto/ecc",
+    ],
+    copts = ["-O3", "-maes", "-mpclmul"],
+)
