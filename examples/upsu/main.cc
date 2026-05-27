@@ -13,20 +13,20 @@
 #include "examples/upsu/upsu.h"
 #include "examples/upsi/psu/psu.h"
 #include "examples/upsi/rr22/okvs/baxos.h"
-#include "yacl/base/int128.h"
-#include "yacl/crypto/hash/blake3.h"
 #include "yacl/link/test_util.h"
 
 using namespace std;
 using namespace upsu;
+
 namespace {
 
 // ── Test data generation ──────────────────────────────────────────
+// Using simple arithmetic (no Blake3), consistent with Python simulation.
 
 ElemSet MakeSet(size_t base, size_t n) {
   ElemSet out;
   for (size_t i = 0; i < n; ++i)
-    out.push_back(yacl::crypto::Blake3_128(std::to_string(base + i)));
+    out.push_back(static_cast<uint128_t>(base * 1000000 + i));
   return out;
 }
 
@@ -53,7 +53,6 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
   set<Element> U_cur = u0;
 
   for (size_t r = 0; r < rounds; ++r) {
-    // Generate additions and deletions with known ground truth
     size_t add_base = (r + 2) * n + add_n;
     size_t sub_off  = (r * sub_n) % n;
 
@@ -63,7 +62,7 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     xp = MakeSet(add_base, add_n);
     // X deletions: remove some existing elements
     for (size_t i = 0; i < sub_n; ++i) {
-      xm.push_back(yacl::crypto::Blake3_128(std::to_string(sub_off + i)));
+      xm.push_back(static_cast<uint128_t>(sub_off + i));
     }
 
     // Y additions: fresh elements, disjoint from Y_cur
@@ -73,7 +72,7 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     for (size_t i = 0; i < sub_n; ++i) {
       size_t idx = n / 2 + sub_off + i;
       if (idx < n / 2 + n) {
-        ym.push_back(yacl::crypto::Blake3_128(std::to_string(idx)));
+        ym.push_back(static_cast<uint128_t>(idx));
       }
     }
 
@@ -83,11 +82,7 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     d.Y_minus.push_back(ym);
 
     // Update ground truth
-    for (auto x : xm) { X_cur.erase(x); U_cur.erase(x); }
-    // xm: some might still be in Y_cur → need to check before erasing from U
-    // Actually: U_i = (U_{i-1} \ U_i^-) ∪ X_i^+ ∪ Y_i^+
-    // U_i^- = (X_{i-1}\Y_{i-1} ∩ X_i^-) ∪ (Y_{i-1}\X_{i-1} ∩ Y_i^-) ∪ (X_i^- ∩ Y_i^-)
-    // For simplicity: just apply by re-union
+    for (auto x : xm) { X_cur.erase(x); }
     for (auto y : ym) { Y_cur.erase(y); }
     for (auto x : xp) { X_cur.insert(x); U_cur.insert(x); }
     for (auto y : yp) { Y_cur.insert(y); U_cur.insert(y); }
@@ -159,7 +154,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
   // ── Update rounds ──
   size_t total_comm = 0;
 
-  // Use a single Baxos per party, re-created per round with appropriate size
   okvs::Baxos baxos_p0 = MakeBaxos(std::max(add_n, sub_n));
   okvs::Baxos baxos_p1 = MakeBaxos(std::max(add_n, sub_n));
 
@@ -201,7 +195,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
       cout << "  U_p0.size=" << U_p0.size()
            << "  U_p1.size=" << U_p1.size()
            << "  gt.size=" << data.U_gt[r].size() << "\n";
-      // Compute differences for debugging
       set<Element> diff;
       for (auto x : gt) if (!up0.count(x)) diff.insert(x);
       cout << "  Missing from P0: " << diff.size() << "\n";
@@ -213,7 +206,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     total_comm = comm;
   }
 
-  // ── Summary ──
   cout << "\nTotal communication: " << MB(total_comm) << "\n";
 }
 
