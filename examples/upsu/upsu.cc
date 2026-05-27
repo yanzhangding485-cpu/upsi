@@ -61,7 +61,10 @@ PRFVal StripKey(const PRFVal& v, const yc::MPInt& sk_inv,
 }
 
 uint128_t HashPRFToUint128(const PRFVal& v) {
-  return yc::Blake3_128(v);
+  uint128_t h = 0;
+  for (size_t i = 0; i < std::min(v.size(), size_t(16)); ++i)
+    h = (h << 8) | static_cast<uint8_t>(v[i]);
+  return h;
 }
 
 std::map<PRFVal, Element> BuildHashLookup(
