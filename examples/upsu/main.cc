@@ -19,8 +19,6 @@
 
 using namespace std;
 using namespace upsu;
-using yacl::crypto::Blake3_128;
-
 namespace {
 
 // ── Test data generation ──────────────────────────────────────────
@@ -28,7 +26,7 @@ namespace {
 ElemSet MakeSet(size_t base, size_t n) {
   ElemSet out;
   for (size_t i = 0; i < n; ++i)
-    out.push_back(Blake3_128(to_string(base + i)));
+    out.push_back(yacl::crypto::Blake3_128(std::to_string(base + i)));
   return out;
 }
 
@@ -65,7 +63,7 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     xp = MakeSet(add_base, add_n);
     // X deletions: remove some existing elements
     for (size_t i = 0; i < sub_n; ++i) {
-      xm.push_back(Blake3_128(to_string(sub_off + i)));
+      xm.push_back(yacl::crypto::Blake3_128(std::to_string(sub_off + i)));
     }
 
     // Y additions: fresh elements, disjoint from Y_cur
@@ -75,7 +73,7 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
     for (size_t i = 0; i < sub_n; ++i) {
       size_t idx = n / 2 + sub_off + i;
       if (idx < n / 2 + n) {
-        ym.push_back(Blake3_128(to_string(idx)));
+        ym.push_back(yacl::crypto::Blake3_128(std::to_string(idx)));
       }
     }
 
@@ -159,7 +157,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
        << (init_ok ? "CORRECT" : "FAIL") << "\n";
 
   // ── Update rounds ──
-  double total_pre = 0, total_del = 0, total_add = 0;
   size_t total_comm = 0;
 
   // Use a single Baxos per party, re-created per round with appropriate size
