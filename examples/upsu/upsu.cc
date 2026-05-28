@@ -252,7 +252,7 @@ static PRFSet UnhashPRFSet(const ElemSet& hashed, const PRFSet& original) {
 
 okvs::Baxos MakeBaxos(size_t max_items) {
   okvs::Baxos b;
-  size_t n = std::max(max_items, size_t(1 << 10));
+  size_t n = std::max(max_items, size_t(32));
   uint128_t seed = static_cast<uint128_t>(std::hash<size_t>{}(max_items));
   yc::Prg<uint128_t> prng(seed);
   prng.Fill(absl::MakeSpan(&seed, 1));
