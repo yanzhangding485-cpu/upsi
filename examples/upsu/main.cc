@@ -26,7 +26,7 @@ namespace {
 ElemSet MakeSet(size_t base, size_t n) {
   ElemSet out;
   for (size_t i = 0; i < n; ++i)
-    out.push_back(static_cast<uint128_t>(base * 1000000 + i));
+    out.push_back(static_cast<uint128_t>(base + i));
   return out;
 }
 
