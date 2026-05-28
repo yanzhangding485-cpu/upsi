@@ -11,11 +11,16 @@
 
 #include "examples/upsi/psu/psu.h"
 #include "examples/upsi/rr22/rr22.h"
-#include "yacl/crypto/hash/blake3.h"
+#include <functional>
 
 namespace upsu {
 
 namespace yc = yacl::crypto;
+
+// Buffer→string conversion (SerializePoint returns yacl::Buffer)
+inline std::string BufToStr(const yacl::Buffer& b) {
+  return std::string(reinterpret_cast<const char*>(b.data()), b.size());
+}
 
 // ── Local helper ──
 inline std::string uint128_to_string(uint128_t value) {
@@ -35,7 +40,7 @@ inline std::string uint128_to_string(uint128_t value) {
 PRFVal HashToCurve(Element x, const std::shared_ptr<yc::EcGroup>& ec) {
   auto pt = ec->HashToCurve(yc::HashToCurveStrategy::Autonomous,
                             uint128_to_string(x));
-  return ec->SerializePoint(pt);
+  return BufToStr(ec->SerializePoint(pt));
 }
 
 PRFVal ComputeSinglePRF(Element x, const yc::MPInt& sk,
@@ -43,28 +48,26 @@ PRFVal ComputeSinglePRF(Element x, const yc::MPInt& sk,
   auto pt = ec->HashToCurve(yc::HashToCurveStrategy::Autonomous,
                             uint128_to_string(x));
   ec->MulInplace(&pt, sk);
-  return ec->SerializePoint(pt);
+  return BufToStr(ec->SerializePoint(pt));
 }
 
 PRFVal RaiseToKey(const PRFVal& v, const yc::MPInt& sk,
                    const std::shared_ptr<yc::EcGroup>& ec) {
-  auto pt = ec->DeserializePoint(absl::MakeSpan(v.data(), v.size()));
+  auto pt = ec->DeserializePoint(yacl::ByteContainerView(v.data(), v.size()));
   ec->MulInplace(&pt, sk);
-  return ec->SerializePoint(pt);
+  return BufToStr(ec->SerializePoint(pt));
 }
 
 PRFVal StripKey(const PRFVal& v, const yc::MPInt& sk_inv,
                  const std::shared_ptr<yc::EcGroup>& ec) {
-  auto pt = ec->DeserializePoint(absl::MakeSpan(v.data(), v.size()));
+  auto pt = ec->DeserializePoint(yacl::ByteContainerView(v.data(), v.size()));
   ec->MulInplace(&pt, sk_inv);
-  return ec->SerializePoint(pt);
+  return BufToStr(ec->SerializePoint(pt));
 }
 
 uint128_t HashPRFToUint128(const PRFVal& v) {
-  uint128_t h = 0;
-  for (size_t i = 0; i < std::min(v.size(), size_t(16)); ++i)
-    h = (h << 8) | static_cast<uint8_t>(v[i]);
-  return h;
+  size_t h = std::hash<std::string>{}(v);
+  return static_cast<uint128_t>(h);
 }
 
 std::map<PRFVal, Element> BuildHashLookup(
@@ -156,9 +159,11 @@ PRFSet MROPRF_Receiver(const std::shared_ptr<yacl::link::Context>& ctx,
   YACL_ENFORCE(resp.size() == int64_t(n * kEcPointBytes));
 
   // Deserialize
-  for (size_t i = 0; i < n; ++i)
+  for (size_t i = 0; i < n; ++i) {
     pts[i] = ec->DeserializePoint(
-        absl::MakeSpan(resp.data() + i * kEcPointBytes, kEcPointBytes));
+        yacl::ByteContainerView(static_cast<const uint8_t*>(resp.data()) + i * kEcPointBytes,
+                                kEcPointBytes));
+  }
 
   // Unblind: H(x)^{r * sender_sk * r^{-1}} = H(x)^{sender_sk}
   for (size_t i = 0; i < n; ++i)
@@ -166,8 +171,9 @@ PRFSet MROPRF_Receiver(const std::shared_ptr<yacl::link::Context>& ctx,
 
   // Serialize to PRF values
   PRFSet out(n);
-  for (size_t i = 0; i < n; ++i)
-    out[i] = ec->SerializePoint(pts[i]);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = BufToStr(ec->SerializePoint(pts[i]));
+  }
   return out;
 }
 
@@ -181,9 +187,11 @@ void MROPRF_Sender(const std::shared_ptr<yacl::link::Context>& ctx,
   YACL_ENFORCE(raw.size() == int64_t(n * kEcPointBytes));
 
   std::vector<yc::EcPoint> pts(n);
-  for (size_t i = 0; i < n; ++i)
+  for (size_t i = 0; i < n; ++i) {
     pts[i] = ec->DeserializePoint(
-        absl::MakeSpan(raw.data() + i * kEcPointBytes, kEcPointBytes));
+        yacl::ByteContainerView(static_cast<const uint8_t*>(raw.data()) + i * kEcPointBytes,
+                                kEcPointBytes));
+  }
 
   // Apply sender key: H(x)^{r * sender_sk}
   for (size_t i = 0; i < n; ++i)
@@ -243,8 +251,9 @@ static PRFSet UnhashPRFSet(const ElemSet& hashed, const PRFSet& original) {
 okvs::Baxos MakeBaxos(size_t max_items) {
   okvs::Baxos b;
   size_t n = std::max(max_items, size_t(1 << 10));
-  yc::Prg<uint128_t> prng(yc::FastRandU128());
-  uint128_t seed; prng.Fill(absl::MakeSpan(&seed, 1));
+  uint128_t seed = static_cast<uint128_t>(std::hash<size_t>{}(max_items));
+  yc::Prg<uint128_t> prng(seed);
+  prng.Fill(absl::MakeSpan(&seed, 1));
   b.Init(n, n, 3, 40, okvs::PaxosParam::DenseType::GF128, seed);
   return b;
 }
