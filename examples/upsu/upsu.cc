@@ -67,9 +67,11 @@ PRFVal StripKey(const PRFVal& v, const yc::MPInt& sk_inv,
 }
 
 uint128_t HashPRFToUint128(const PRFVal& v) {
-  uint64_t lo = std::hash<std::string>{}(v);
-  uint64_t hi = std::hash<std::string>{}(v + '\0');
-  return (static_cast<uint128_t>(hi) << 64) | lo;
+  // Use raw EC point bytes — deterministic and collision-resistant.
+  // v is 32 bytes, take first 16 as uint128_t.
+  uint128_t out = 0;
+  std::memcpy(&out, v.data(), std::min(sizeof(out), v.size()));
+  return out;
 }
 
 std::map<PRFVal, Element> BuildHashLookup(
