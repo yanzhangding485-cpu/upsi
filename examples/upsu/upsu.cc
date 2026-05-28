@@ -340,28 +340,13 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
   uint32_t psi_sz1 = RecvUint32(ctx, "d_psz1");
   size_t psi_max = std::max(psi_p0.size(), size_t(psi_sz1));
 
-  // DEBUG: check for duplicates in psi_p0
-  std::cerr << "[P0] psi_p0.size=" << psi_p0.size()
-            << " psi_sz1=" << psi_sz1
-            << " psi_max=" << psi_max << "\n";
-  {
-    std::set<uint128_t> dup_check;
-    for (auto v : psi_p0) {
-      if (dup_check.count(v))
-        std::cerr << "[P0] DUPLICATE in psi_p0!\n";
-      dup_check.insert(v);
-    }
-  }
-
   PRFSet prf_Xi_cap_Yi;
   if (psi_max > 0) {
     okvs::Baxos psi_bx = MakeBaxos(psi_max);
-    std::cerr << "[P0] calling RR22PsiRecv with " << psi_p0.size() << " elements\n";
     auto fut_psi = std::async(std::launch::async, [&]() {
       return rr22::RR22PsiRecv(ctx, psi_p0, psi_bx);
     });
     prf_Xi_cap_Yi = UnhashPRFSet(fut_psi.get(), p.prf_peer_del);
-    std::cerr << "[P0] RR22PsiRecv done, intersection size=" << prf_Xi_cap_Yi.size() << "\n";
   }
 
   // Step 6-7: Exchange F(D_X) ↔ F(D_Y)
@@ -479,28 +464,13 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
   SendUint32(ctx, uint32_t(psi_p1.size()), "d_psz1");
   size_t psi_max = std::max(size_t(psi_sz0), psi_p1.size());
 
-  // DEBUG: check for duplicates in psi_p1
-  std::cerr << "[P1] psi_sz0=" << psi_sz0
-            << " psi_p1.size=" << psi_p1.size()
-            << " psi_max=" << psi_max << "\n";
-  {
-    std::set<uint128_t> dup_check;
-    for (auto v : psi_p1) {
-      if (dup_check.count(v))
-        std::cerr << "[P1] DUPLICATE in psi_p1!\n";
-      dup_check.insert(v);
-    }
-  }
-
   PRFSet prf_Xi_cap_Yi;
   if (psi_max > 0) {
     okvs::Baxos psi_bx = MakeBaxos(psi_max);
-    std::cerr << "[P1] calling RR22PsiSend with " << psi_p1.size() << " elements\n";
     auto fut_psi = std::async(std::launch::async, [&]() {
       return rr22::RR22PsiSend(ctx, psi_p1, psi_bx);
     });
     prf_Xi_cap_Yi = UnhashPRFSet(fut_psi.get(), p.prf_peer_del);
-    std::cerr << "[P1] RR22PsiSend done, intersection size=" << prf_Xi_cap_Yi.size() << "\n";
   }
 
   // Step 6-7: Exchange F(D_Y) ↔ F(D_X)
