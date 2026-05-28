@@ -37,9 +37,10 @@ struct TestData {
   vector<ElemSet> U_gt;   // ground-truth union after each round
 };
 
-TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
+TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
+                            double overlap_ratio = 0.5) {
   // X = [0 .. n-1]
-  // Y = [n/2 .. 3n/2-1]  → overlap = n/2
+  // Y = [n/2 .. 3n/2-1]  → overlap = n/2 (range [n/2, n-1] in both sets)
   TestData d;
   d.X = MakeSet(0, n);
   d.Y = MakeSet(n / 2, n);
@@ -52,29 +53,33 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
   set<Element> Y_cur(d.Y.begin(), d.Y.end());
   set<Element> U_cur = u0;
 
+  // Safe offset range: overlap is [n/2, n-1], need room for sub_n elements
+  size_t sub_space = n / 2 - sub_n - 1;
+
   for (size_t r = 0; r < rounds; ++r) {
     size_t add_base = (r + 2) * n + add_n;
-    size_t sub_off  = (r * sub_n) % n;
+    size_t sub_off  = sub_space > 0 ? ((r * sub_n) % sub_space) : 0;
 
     ElemSet xp, xm, yp, ym;
 
     // X additions: fresh elements, disjoint from X_cur
     xp = MakeSet(add_base, add_n);
-    // X deletions: remove some existing elements
-    for (size_t i = 0; i < sub_n; ++i) {
-      xm.push_back(static_cast<uint128_t>(sub_off + i));
-    }
+
+    // X deletions: from the overlap region [n/2, n-1]  (present in both X and Y)
+    for (size_t i = 0; i < sub_n; ++i)
+      xm.push_back(static_cast<uint128_t>(n / 2 + sub_off + i));
 
     // Y additions: fresh elements, disjoint from Y_cur
     size_t y_add_base = add_base + add_n;
     yp = MakeSet(y_add_base, add_n);
-    // Y deletions: remove some elements
-    for (size_t i = 0; i < sub_n; ++i) {
-      size_t idx = n / 2 + sub_off + i;
-      if (idx < n / 2 + n) {
-        ym.push_back(static_cast<uint128_t>(idx));
-      }
-    }
+
+    // Y deletions: overlap_n elements same as X (for PSI), rest from Y's
+    // exclusive part [n, 3n/2-1]
+    size_t overlap_n = static_cast<size_t>(sub_n * overlap_ratio);
+    for (size_t i = 0; i < overlap_n; ++i)
+      ym.push_back(static_cast<uint128_t>(n / 2 + sub_off + i));
+    for (size_t i = overlap_n; i < sub_n; ++i)
+      ym.push_back(static_cast<uint128_t>(n + sub_off + (i - overlap_n)));
 
     d.X_plus.push_back(xp);
     d.X_minus.push_back(xm);
@@ -116,14 +121,16 @@ string MB(size_t bytes) {
 
 // ── Main benchmark ─────────────────────────────────────────────────
 
-void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds) {
+void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
+                  double overlap_ratio = 0.5) {
   cout << "\n=== UPSU Benchmark ===\n";
   cout << "|X| = |Y| = " << n
        << ", |X^+|=|Y^+| = " << add_n
        << ", |X^-|=|Y^-| = " << sub_n
-       << ", rounds = " << rounds << "\n\n";
+       << ", rounds = " << rounds
+       << ", overlap = " << (int)(overlap_ratio * 100) << "%\n\n";
 
-  auto data = GenerateTestData(n, add_n, sub_n, rounds);
+  auto data = GenerateTestData(n, add_n, sub_n, rounds, overlap_ratio);
 
   // Setup network (two parties, localhost)
   auto lctxs = yacl::link::test::SetupBrpcWorld(2);
@@ -219,12 +226,14 @@ int main(int argc, char** argv) {
   size_t add_n = 1 << 8;   // 256
   size_t sub_n = 1 << 8;   // 256
   size_t rounds = 1;
+  double overlap = 0.5;
 
-  if (argc > 1) n      = atoi(argv[1]);
-  if (argc > 2) add_n  = atoi(argv[2]);
-  if (argc > 3) sub_n  = atoi(argv[3]);
-  if (argc > 4) rounds = atoi(argv[4]);
+  if (argc > 1) n       = atoi(argv[1]);
+  if (argc > 2) add_n   = atoi(argv[2]);
+  if (argc > 3) sub_n   = atoi(argv[3]);
+  if (argc > 4) rounds  = atoi(argv[4]);
+  if (argc > 5) overlap = atof(argv[5]);
 
-  RunBenchmark(n, add_n, sub_n, rounds);
+  RunBenchmark(n, add_n, sub_n, rounds, overlap);
   return 0;
 }
