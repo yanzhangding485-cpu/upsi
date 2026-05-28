@@ -12,6 +12,7 @@
 #include "examples/upsi/psu/psu.h"
 #include "examples/upsi/rr22/rr22.h"
 #include <functional>
+#include "yacl/crypto/hash/blake3.h"
 
 namespace upsu {
 
@@ -66,8 +67,7 @@ PRFVal StripKey(const PRFVal& v, const yc::MPInt& sk_inv,
 }
 
 uint128_t HashPRFToUint128(const PRFVal& v) {
-  size_t h = std::hash<std::string>{}(v);
-  return static_cast<uint128_t>(h);
+  return yacl::crypto::Blake3_128(yacl::ByteContainerView(v.data(), v.size()));
 }
 
 std::map<PRFVal, Element> BuildHashLookup(
