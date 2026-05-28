@@ -12,7 +12,7 @@
 #include "examples/upsi/psu/psu.h"
 #include "examples/upsi/rr22/rr22.h"
 #include <functional>
-#include "yacl/crypto/hash/blake3.h"
+#include "yacl/crypto/hash/hash_utils.h"
 
 namespace upsu {
 
