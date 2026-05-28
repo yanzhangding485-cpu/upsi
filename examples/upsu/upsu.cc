@@ -336,6 +336,11 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
 
   // Step 5: PSI(F(Y_i^-), F(X_i^-)) → F(X_i^- ∩ Y_i^-)
   ElemSet psi_p0 = HashPRFSet(p.prf_peer_del);
+  // DEBUG: print first 3 hashes to compare with P1
+  std::cerr << "[P0] prf_peer_del[0..2] hashes: ";
+  for (int kk = 0; kk < 3 && kk < (int)psi_p0.size(); ++kk)
+    std::cerr << psi_p0[kk] << " ";
+  std::cerr << "\n";
   SendUint32(ctx, uint32_t(psi_p0.size()), "d_psz0");
   uint32_t psi_sz1 = RecvUint32(ctx, "d_psz1");
   size_t psi_max = std::max(psi_p0.size(), size_t(psi_sz1));
@@ -461,6 +466,11 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
   // Step 5: PSI(F(X_i^-), F(Y_i^-)) → F(X_i^- ∩ Y_i^-)
   uint32_t psi_sz0 = RecvUint32(ctx, "d_psz0");
   ElemSet psi_p1 = HashPRFSet(p.prf_peer_del);
+  // DEBUG: print first 3 hashes to compare with P0
+  std::cerr << "[P1] prf_peer_del[0..2] hashes: ";
+  for (int kk = 0; kk < 3 && kk < (int)psi_p1.size(); ++kk)
+    std::cerr << psi_p1[kk] << " ";
+  std::cerr << "\n";
   SendUint32(ctx, uint32_t(psi_p1.size()), "d_psz1");
   size_t psi_max = std::max(size_t(psi_sz0), psi_p1.size());
 
