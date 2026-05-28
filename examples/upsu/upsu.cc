@@ -67,7 +67,9 @@ PRFVal StripKey(const PRFVal& v, const yc::MPInt& sk_inv,
 }
 
 uint128_t HashPRFToUint128(const PRFVal& v) {
-  return yacl::crypto::Blake3_128(yacl::ByteContainerView(v.data(), v.size()));
+  uint64_t lo = std::hash<std::string>{}(v);
+  uint64_t hi = std::hash<std::string>{}(v + '\0');
+  return (static_cast<uint128_t>(hi) << 64) | lo;
 }
 
 std::map<PRFVal, Element> BuildHashLookup(
