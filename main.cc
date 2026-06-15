@@ -46,7 +46,7 @@ namespace {
 
 // Change this to `PsuProtocol::kKrtw` to run UPSI with the legacy KRTW PSU.
 constexpr PsuProtocol kUpSiPsuProtocol = PsuProtocol::kKrtw;
-constexpr uint64_t kUpSiRecvTimeoutMs = 10 * 60 * 1000;
+constexpr uint64_t kUpSiRecvTimeoutMs = 30 * 60 * 1000;
 
 std::filesystem::path GetExecutableDir() {
   std::error_code ec;

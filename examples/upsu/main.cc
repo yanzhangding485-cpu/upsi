@@ -217,6 +217,32 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     }
 
     total_comm = comm;
+    // Fair comparison: PSUx2
+    {
+      set<Element> xs(data.X.begin(), data.X.end());
+      set<Element> ys(data.Y.begin(), data.Y.end());
+      for (auto e : data.X_minus[r]) xs.erase(e);
+      for (auto e : data.X_plus[r])  xs.insert(e);
+      for (auto e : data.Y_minus[r]) ys.erase(e);
+      for (auto e : data.Y_plus[r])  ys.insert(e);
+      ElemSet X_new(xs.begin(), xs.end());
+      ElemSet Y_new(ys.begin(), ys.end());
+      cout << "  Updated: |X'|=" << X_new.size() << " |Y'|=" << Y_new.size() << "\n";
+      Timer t2; t2.start();
+      auto f0 = async(launch::async, [&]() { return PsuRecv(lctxs[0], X_new); });
+      auto f1 = async(launch::async, [&]() { return PsuSend(lctxs[1], Y_new); });
+      auto U2_p0 = f0.get(); auto U2_p1 = f1.get();
+      double psu2_ms = t2.ms();
+      set<Element> psu2_set(U2_p0.begin(), U2_p0.end());
+      bool match = (U2_p0.size() == U2_p1.size()) && (psu2_set == gt);
+      double upsu_total = init_ms + round_ms;
+      double psu2_total = init_ms + psu2_ms;
+      cout << "  PSU(X',Y'): " << psu2_ms << " ms  |U|=" << U2_p0.size()
+           << "  " << (match ? "MATCH" : "MISMATCH") << "\n";
+      cout << "  UPSU  (Init+Round):   " << upsu_total << " ms\n";
+      cout << "  PSUx2 (Init+PSU_new): " << psu2_total << " ms\n";
+      cout << "  Speedup: " << fixed << setprecision(2) << psu2_total / upsu_total << "x\n";
+    }
   }
 
   cout << "\nTotal communication: " << MB(total_comm) << "\n";
