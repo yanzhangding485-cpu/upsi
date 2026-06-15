@@ -20,6 +20,9 @@ using namespace upsu;
 
 namespace {
 
+// 30 min recv timeout for N=2^20
+constexpr uint64_t kRecvTimeoutMs = 30 * 60 * 1000;
+
 // ── Test data generation ──────────────────────────────────────────
 // Using simple arithmetic (no Blake3), consistent with Python simulation.
 
@@ -134,6 +137,9 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
   // Setup network (two parties, localhost)
   auto lctxs = yacl::link::test::SetupBrpcWorld(2);
+  for (const auto& lctx : lctxs) {
+    lctx->SetRecvTimeout(kRecvTimeoutMs);
+  }
 
   // Setup crypto keys and state
   Party p0, p1;
