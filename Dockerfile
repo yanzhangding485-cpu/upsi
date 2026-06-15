@@ -173,21 +173,6 @@ elif image_path not in s:
 p.write_text(s)
 PY
 
-# Build the upsi example inside yacl without host bazelrc files.
-# Disable Bzlmod so Bazel uses the repo's WORKSPACE-based external dependency setup.
-RUN bazel --bazelrc=/dev/null build \
-    --noenable_bzlmod \
-    --cxxopt=-std=c++17 \
-    --host_cxxopt=-std=c++17 \
-    //examples/upsi:upsi
-
-# Build our UPSU binary
-RUN bazel --bazelrc=/dev/null build \
-    --noenable_bzlmod \
-    --cxxopt=-std=c++17 \
-    --host_cxxopt=-std=c++17 \
-    //examples/upsu:upsu
-
 # Final runtime image
 FROM ubuntu:22.04 AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
@@ -202,8 +187,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /workspace/bazel-bin/examples/upsi/upsi /app/upsi
-COPY --from=builder /workspace/bazel-bin/examples/upsu/upsu /app/upsu
 COPY --from=builder /workspace/examples/upsi/parameters /app/parameters
 COPY --from=builder /workspace/examples/upsi/network_setup.sh /app/network_setup.sh
 

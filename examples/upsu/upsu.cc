@@ -258,7 +258,7 @@ okvs::Baxos MakeBaxos(size_t max_items) {
   uint128_t seed = static_cast<uint128_t>(std::hash<size_t>{}(max_items));
   yc::Prg<uint128_t> prng(seed);
   prng.Fill(absl::MakeSpan(&seed, 1));
-  b.Init(n, n, 3, 40, okvs::PaxosParam::DenseType::GF128, seed);
+  b.Init(n * 2, n, 3, 40, okvs::PaxosParam::DenseType::GF128, seed);
   return b;
 }
 

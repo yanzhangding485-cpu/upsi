@@ -1,2 +1,9 @@
 benchmark_logs/
 fix_unicode.py
+.bazel-cache/
+bazel-*
+upsi-builder.tar
+upsu.bin
+upsu_omp.bin
+lib25519-clean.tar.gz
+.bazel-cache/
