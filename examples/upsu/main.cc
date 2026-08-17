@@ -178,6 +178,10 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
   // ── Update rounds ──
   size_t total_comm = init_comm;
+  double cum_round_ms = 0.0;
+  size_t cum_round_comm = 0;
+  double cum_psu_ms = 0.0;
+  size_t cum_psu_comm = 0;
 
   for (size_t r = 0; r < rounds; ++r) {
     size_t comm_before = lctxs[0]->GetStats()->sent_bytes.load()
@@ -203,6 +207,9 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     // Communication stats
     size_t comm = lctxs[0]->GetStats()->sent_bytes.load()
                 + lctxs[0]->GetStats()->recv_bytes.load();
+    size_t round_comm = comm - comm_before;
+    cum_round_comm += round_comm;
+    cum_round_ms += round_ms;
 
     // Verify correctness
     set<Element> up0(U_p0.begin(), U_p0.end());
@@ -211,7 +218,7 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
     bool ok = (up0 == gt) && (up1 == gt);
     cout << "Round " << (r + 1) << ": " << round_ms << " ms  "
-         << "comm=" << MB(comm - comm_before) << "  "
+         << "comm=" << MB(round_comm) << "  "
          << "|U|=" << U_p0.size() << "  "
          << (ok ? "OK" : "FAIL") << "\n";
 
@@ -229,6 +236,8 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
     total_comm = comm;
     // Fair comparison: PSUx2
+    size_t psu_comm_before = lctxs[0]->GetStats()->sent_bytes.load()
+                           + lctxs[0]->GetStats()->recv_bytes.load();
     {
       set<Element> xs(data.X.begin(), data.X.end());
       set<Element> ys(data.Y.begin(), data.Y.end());
@@ -246,16 +255,26 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
       double psu2_ms = t2.ms();
       set<Element> psu2_set(U2_p0.begin(), U2_p0.end());
       bool match = (U2_p0.size() == U2_p1.size()) && (psu2_set == gt);
-      double upsu_total = init_ms + round_ms;
-      double psu2_total = init_ms + psu2_ms;
+      size_t psu_comm_after = lctxs[0]->GetStats()->sent_bytes.load()
+                            + lctxs[0]->GetStats()->recv_bytes.load();
+      size_t psu_comm = psu_comm_after - psu_comm_before;
+      cum_psu_comm += psu_comm;
+      cum_psu_ms += psu2_ms;
       cout << "  PSU(X',Y'): " << psu2_ms << " ms  |U|=" << U2_p0.size()
            << "  " << (match ? "MATCH" : "MISMATCH") << "\n";
-      cout << "  UPSU  (Init+Round):   " << upsu_total << " ms\n";
-      cout << "  PSUx2 (Init+PSU_new): " << psu2_total << " ms\n";
-      cout << "  Speedup: " << fixed << setprecision(2) << psu2_total / upsu_total << "x\n";
+      cout << "  UPSU (Round): " << round_ms << " ms  comm=" << MB(round_comm) << "\n";
+      cout << "  PSU (re-run): " << psu2_ms << " ms  comm=" << MB(psu_comm) << "\n";
+      cout << "  Per-round speedup: " << fixed << setprecision(2) << psu2_ms / round_ms << "x\n";
     }
   }
 
+  cout << "\n=== Cumulative over " << rounds << " round(s) ===\n";
+  cout << "UPSU total (Init + " << rounds << " rounds): " << (init_ms + cum_round_ms)
+       << " ms  comm=" << MB(init_comm + cum_round_comm) << "\n";
+  cout << "PSUx" << (rounds + 1) << " total: " << (init_ms + cum_psu_ms)
+       << " ms  comm=" << MB(init_comm + cum_psu_comm) << "\n";
+  cout << "Cumulative speedup: " << fixed << setprecision(2)
+       << (init_ms + cum_psu_ms) / (init_ms + cum_round_ms) << "x\n";
   cout << "\nTotal communication: " << MB(total_comm) << "\n";
 }
 
