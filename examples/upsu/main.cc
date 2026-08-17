@@ -172,11 +172,16 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
   bool init_ok = (p0.U.size() == data.U_ground_truth.size()) && (u0 == gt0);
   cout << "Init: " << init_ms << " ms  "
        << (init_ok ? "CORRECT" : "FAIL") << "\n";
+  size_t init_comm = lctxs[0]->GetStats()->sent_bytes.load()
+                   + lctxs[0]->GetStats()->recv_bytes.load();
+  cout << "Init communication: " << MB(init_comm) << "\n";
 
   // ── Update rounds ──
-  size_t total_comm = 0;
+  size_t total_comm = init_comm;
 
   for (size_t r = 0; r < rounds; ++r) {
+    size_t comm_before = lctxs[0]->GetStats()->sent_bytes.load()
+                       + lctxs[0]->GetStats()->recv_bytes.load();
     Timer t_round;
     t_round.start();
 
@@ -206,7 +211,7 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
     bool ok = (up0 == gt) && (up1 == gt);
     cout << "Round " << (r + 1) << ": " << round_ms << " ms  "
-         << "comm=" << MB(comm - total_comm) << "  "
+         << "comm=" << MB(comm - comm_before) << "  "
          << "|U|=" << U_p0.size() << "  "
          << (ok ? "OK" : "FAIL") << "\n";
 
