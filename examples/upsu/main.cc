@@ -178,6 +178,8 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
 
   // ── Update rounds ──
   size_t total_comm = init_comm;
+  set<Element> xs(data.X.begin(), data.X.end());  // running X for PSU baseline
+  set<Element> ys(data.Y.begin(), data.Y.end());  // running Y for PSU baseline
   double cum_round_ms = 0.0;
   size_t cum_round_comm = 0;
   double cum_psu_ms = 0.0;
@@ -239,8 +241,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     size_t psu_comm_before = lctxs[0]->GetStats()->sent_bytes.load()
                            + lctxs[0]->GetStats()->recv_bytes.load();
     {
-      set<Element> xs(data.X.begin(), data.X.end());
-      set<Element> ys(data.Y.begin(), data.Y.end());
       for (auto e : data.X_minus[r]) xs.erase(e);
       for (auto e : data.X_plus[r])  xs.insert(e);
       for (auto e : data.Y_minus[r]) ys.erase(e);
