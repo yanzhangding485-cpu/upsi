@@ -76,13 +76,12 @@ struct Party {
   ElemSet peer_excl;   // peer's exclusive elements: Y\X (P0) or X\Y (P1)
 
   // preprocess results — double-keyed PRF values
-  PRFSet prf_peer_excl;  // F(peer_excl) — mapped to plaintext
+  PRFSet prf_peer_excl;  // F((Y\\X)\\X_i^+) — mapped to plaintext
   PRFSet prf_own_add;    // F(own additions) — mapped to plaintext
+  PRFSet prf_own_del;    // F(own deletions) — mapped to plaintext
 
   // deletion phase
-  PRFSet prf_peer_del;   // F(peer deletions) — UNmapped
-  PRFSet prf_D_own;      // F(D_X) or F(D_Y) — mapped
-  PRFSet prf_U_minus;    // F(U_i^-) — combined, mostly UNmapped
+  PRFSet prf_U_minus;    // F(U_i^-) from the PSI output — mostly UNmapped
 };
 
 // ── Helpers ──
@@ -97,10 +96,10 @@ void InitP1(const std::shared_ptr<yacl::link::Context>& ctx,
 ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
                        Party& p,
                        const ElemSet& X_plus, const ElemSet& X_minus,
-                       okvs::Baxos& del_baxos);
+                       size_t add_max, size_t sub_max);
 ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
                        Party& p,
                        const ElemSet& Y_plus, const ElemSet& Y_minus,
-                       okvs::Baxos& del_baxos);
+                       size_t add_max, size_t sub_max);
 
 }  // namespace upsu

@@ -41,7 +41,7 @@ struct TestData {
 };
 
 TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
-                            double overlap_ratio = 0.5) {
+                            double overlap_ratio = 0.5, bool collide = false) {
   // X = [0 .. n-1]
   // Y = [n/2 .. 3n/2-1]  → overlap = n/2 (range [n/2, n-1] in both sets)
   TestData d;
@@ -84,6 +84,14 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     for (size_t i = overlap_n; i < sub_n; ++i)
       ym.push_back(static_cast<uint128_t>(n + sub_off + (i - overlap_n)));
 
+    // Collision mode: one party deletes an exclusive element while the
+    // other re-adds it in the same round (D_X∩X_i^+ and D_Y∩Y_i^+).
+    if (collide && sub_n >= 1 && add_n >= 1) {
+      xp[0] = ym.back();                        // X adds Y's exclusive deletion
+      xm[0] = static_cast<uint128_t>(sub_off);  // X deletes its exclusive element
+      yp[0] = static_cast<uint128_t>(sub_off);  // Y re-adds it
+    }
+
     d.X_plus.push_back(xp);
     d.X_minus.push_back(xm);
     d.Y_plus.push_back(yp);
@@ -125,15 +133,16 @@ string MB(size_t bytes) {
 // ── Main benchmark ─────────────────────────────────────────────────
 
 void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
-                  double overlap_ratio = 0.5) {
+                  double overlap_ratio = 0.5, bool collide = false) {
   cout << "\n=== UPSU Benchmark ===\n";
   cout << "|X| = |Y| = " << n
        << ", |X^+|=|Y^+| = " << add_n
        << ", |X^-|=|Y^-| = " << sub_n
        << ", rounds = " << rounds
-       << ", overlap = " << (int)(overlap_ratio * 100) << "%\n\n";
+       << ", overlap = " << (int)(overlap_ratio * 100) << "%"
+       << ", collide = " << (collide ? 1 : 0) << "\n\n";
 
-  auto data = GenerateTestData(n, add_n, sub_n, rounds, overlap_ratio);
+  auto data = GenerateTestData(n, add_n, sub_n, rounds, overlap_ratio, collide);
 
   // Setup network (two parties, localhost)
   auto lctxs = yacl::link::test::SetupBrpcWorld(2);
@@ -167,9 +176,6 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
   // ── Update rounds ──
   size_t total_comm = 0;
 
-  okvs::Baxos baxos_p0 = MakeBaxos(std::max(add_n, sub_n));
-  okvs::Baxos baxos_p1 = MakeBaxos(std::max(add_n, sub_n));
-
   for (size_t r = 0; r < rounds; ++r) {
     Timer t_round;
     t_round.start();
@@ -177,12 +183,12 @@ void RunBenchmark(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     auto fut_p0 = async(launch::async, [&]() {
       return UpdateRoundP0(lctxs[0], p0,
                            data.X_plus[r], data.X_minus[r],
-                           baxos_p0);
+                           add_n, sub_n);
     });
     auto fut_p1 = async(launch::async, [&]() {
       return UpdateRoundP1(lctxs[1], p1,
                            data.Y_plus[r], data.Y_minus[r],
-                           baxos_p1);
+                           add_n, sub_n);
     });
 
     auto U_p0 = fut_p0.get();
@@ -260,12 +266,14 @@ int main(int argc, char** argv) {
   size_t rounds = 1;
   double overlap = 0.5;
 
+  bool collide = false;
   if (argc > 1) n       = atoi(argv[1]);
   if (argc > 2) add_n   = atoi(argv[2]);
   if (argc > 3) sub_n   = atoi(argv[3]);
   if (argc > 4) rounds  = atoi(argv[4]);
   if (argc > 5) overlap = atof(argv[5]);
+  if (argc > 6) collide = atoi(argv[6]);
 
-  RunBenchmark(n, add_n, sub_n, rounds, overlap);
+  RunBenchmark(n, add_n, sub_n, rounds, overlap, collide);
   return 0;
 }

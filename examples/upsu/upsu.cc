@@ -250,6 +250,19 @@ static PRFSet UnhashPRFSet(const ElemSet& hashed, const PRFSet& original) {
   return out;
 }
 
+// Append random dummy elements (outside U) until `out` reaches `target`.
+static void AppendDummies(ElemSet& out, size_t target, const ElemSet& U) {
+  std::set<Element> u_set(U.begin(), U.end());
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  while (out.size() < target) {
+    uint64_t hi = gen();
+    uint64_t lo = gen();
+    Element x = (static_cast<uint128_t>(hi) << 64) | lo;
+    if (!u_set.count(x)) out.push_back(x);
+  }
+}
+
 // ═══════════════════════════════════════  Baxos  ═══════════════════
 
 okvs::Baxos MakeBaxos(size_t max_items) {
@@ -294,77 +307,64 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
                        Party& p,
                        const ElemSet& X_plus,
                        const ElemSet& X_minus,
-                       okvs::Baxos& /*del_baxos*/) {
+                       size_t add_max, size_t sub_max) {
   // ────── Preprocess ──────
-  // P0 queries: peer_excl ∪ X_plus → F_{k1}(peer_excl, X_plus)
-  ElemSet query = p.peer_excl;
-  query.insert(query.end(), X_plus.begin(), X_plus.end());
+  // Fixed public sizes (identical on both sides): F_MROPRF/F_PSI reveal
+  // no counts, so the real protocol must not leak them either.
+  const size_t F_MRO = p.U.size() + add_max + sub_max;
+  const size_t F_PSI = p.U.size() + sub_max;
 
-  SendUint32(ctx, uint32_t(query.size()), "p0_qsz");
-  uint32_t p1_qsz = RecvUint32(ctx, "p1_qsz");
+  // P0 queries: (peer_excl \ X_plus) ∪ X_plus ∪ X_minus, padded with
+  // random dummies outside U_{i-1} to the fixed size F_MRO.
+  std::set<Element> xp_set(X_plus.begin(), X_plus.end());
+  ElemSet excl_no_plus;
+  for (auto e : p.peer_excl)
+    if (!xp_set.count(e)) excl_no_plus.push_back(e);
+
+  ElemSet query = excl_no_plus;
+  query.insert(query.end(), X_plus.begin(), X_plus.end());
+  query.insert(query.end(), X_minus.begin(), X_minus.end());
+  AppendDummies(query, F_MRO, p.U);
 
   auto fut_r = std::async(std::launch::async, [&]() {
     return MROPRF_Receiver(ctx, query, p.ec);
   });
   auto fut_s = std::async(std::launch::async, [&]() {
-    MROPRF_Sender(ctx, p1_qsz, p.sk, p.ec);  // P0 uses k0 as sender key
+    MROPRF_Sender(ctx, F_MRO, p.sk, p.ec);  // P0 uses k0 as sender key
   });
   auto vals = fut_r.get(); fut_s.get();
 
-  // Parse: first |peer_excl| are F_{k1}(peer_excl), rest are F_{k1}(X_plus)
+  // Parse: excl | own_add | own_del | dummies
+  const size_t n1 = excl_no_plus.size();
+  const size_t n2 = X_plus.size();
+  const size_t n3 = X_minus.size();
   p.prf_peer_excl.clear();
   p.prf_own_add.clear();
-  for (size_t i = 0; i < p.peer_excl.size(); ++i)
+  p.prf_own_del.clear();
+  for (size_t i = 0; i < n1; ++i)
     p.prf_peer_excl.push_back(RaiseToKey(vals[i], p.sk, p.ec));  // ^{k0} → F
-  for (size_t i = 0; i < X_plus.size(); ++i)
-    p.prf_own_add.push_back(
-        RaiseToKey(vals[p.peer_excl.size() + i], p.sk, p.ec));
+  for (size_t i = 0; i < n2; ++i)
+    p.prf_own_add.push_back(RaiseToKey(vals[n1 + i], p.sk, p.ec));
+  for (size_t i = 0; i < n3; ++i)
+    p.prf_own_del.push_back(RaiseToKey(vals[n1 + n2 + i], p.sk, p.ec));
 
-  // ────── Deletion ──────
-  // Step 1: P0 → P1  F_{k0}(X_i^-)
-  PRFSet fk0_Xm;
-  for (auto x : X_minus)
-    fk0_Xm.push_back(ComputeSinglePRF(x, p.sk, p.ec));
-  SendPRFVec(ctx, fk0_Xm, "d_k0xm");
+  // ────── Deletion: single symmetric PSI ──────
+  // P0's padded input: F((Y\\X)\\X_i^+) ∪ F(X_i^-) ∪ dummies, size F_PSI.
+  PRFSet psi_in = p.prf_peer_excl;
+  psi_in.insert(psi_in.end(), p.prf_own_del.begin(), p.prf_own_del.end());
+  const size_t n_dummy = F_PSI - psi_in.size();
+  for (size_t i = 0; i < n_dummy; ++i)
+    psi_in.push_back(RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec));
 
-  // Step 2: P1 → P0  F_{k1}(Y_i^-)
-  PRFSet fk1_Ym = RecvPRFVec(ctx, "d_k1ym");
-  p.prf_peer_del.clear();
-  for (const auto& v : fk1_Ym)
-    p.prf_peer_del.push_back(RaiseToKey(v, p.sk, p.ec));  // ^{k0} → F(Y_i^-)
-
-  // Step 3: F(D_X) = F(peer_excl) ∩ F(Y_i^-)
-  p.prf_D_own = PRF_Intersect(p.prf_peer_excl, p.prf_peer_del);
-
-  // Step 5: PSI(F(Y_i^-), F(X_i^-)) → F(X_i^- ∩ Y_i^-)
-  ElemSet psi_p0 = HashPRFSet(p.prf_peer_del);
-  // DEBUG: print first 3 hashes to compare with P1
-  std::cerr << "[P0] prf_peer_del[0..2] hashes: ";
-  for (int kk = 0; kk < 3 && kk < (int)psi_p0.size(); ++kk)
-    std::cerr << psi_p0[kk] << " ";
-  std::cerr << "\n";
-  SendUint32(ctx, uint32_t(psi_p0.size()), "d_psz0");
-  uint32_t psi_sz1 = RecvUint32(ctx, "d_psz1");
-  size_t psi_max = std::max(psi_p0.size(), size_t(psi_sz1));
-
-  PRFSet prf_Xi_cap_Yi;
-  if (psi_max > 0) {
-    okvs::Baxos psi_bx = MakeBaxos(psi_max);
+  ElemSet psi_p0 = HashPRFSet(psi_in);
+  p.prf_U_minus.clear();
+  if (F_PSI > 0) {
+    okvs::Baxos psi_bx = MakeBaxos(F_PSI);
     auto fut_psi = std::async(std::launch::async, [&]() {
       return rr22::RR22PsiRecv(ctx, psi_p0, psi_bx);
     });
-    prf_Xi_cap_Yi = UnhashPRFSet(fut_psi.get(), p.prf_peer_del);
+    p.prf_U_minus = UnhashPRFSet(fut_psi.get(), psi_in);
   }
-
-  // Step 6-7: Exchange F(D_X) ↔ F(D_Y)
-  PRFSet prf_DY = RecvPRFVec(ctx, "d_dy");
-  SendPRFVec(ctx, p.prf_D_own, "d_dx");
-
-  // Step 8: F(U_i^-) = F(D_X) ∪ F(D_Y) ∪ F(X_i^- ∩ Y_i^-)
-  std::set<PRFVal> u_set = ToSet(prf_Xi_cap_Yi);
-  for (const auto& v : prf_DY) u_set.insert(v);
-  for (const auto& v : p.prf_D_own) u_set.insert(v);
-  p.prf_U_minus = {u_set.begin(), u_set.end()};
 
   // ────── Addition (blind) ──────
   // Step 1: P1 → P0  F_{k1}(U_{i-1})
@@ -373,9 +373,15 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
   for (const auto& v : fk1_Uprev)
     f_Uprev.push_back(RaiseToKey(v, p.sk, p.ec));
 
-  // Remove F(U_i^-), add F(X_i^+)
+  // Remove F(U_i^-), add F(X_i^+). Use a set to avoid duplicates:
+  // a collision element (in U_{i-1} and re-added in X_i^+) appears once.
+  std::set<PRFVal> u_set = ToSet(p.prf_U_minus);
   PRFSet f_partial = PRF_Diff(f_Uprev, u_set);
-  for (const auto& v : p.prf_own_add) f_partial.push_back(v);
+  {
+    std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
+    for (const auto& v : p.prf_own_add) fpart_set.insert(v);
+    f_partial.assign(fpart_set.begin(), fpart_set.end());
+  }
 
   // Step 3: → P1  F(U_{i-1}\U_i^- ∪ X_i^+)
   SendPRFVec(ctx, f_partial, "a_part");
@@ -425,75 +431,61 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
                        Party& p,
                        const ElemSet& Y_plus,
                        const ElemSet& Y_minus,
-                       okvs::Baxos& /*del_baxos*/) {
+                       size_t add_max, size_t sub_max) {
   // ────── Preprocess ──────
-  ElemSet query = p.peer_excl;
-  query.insert(query.end(), Y_plus.begin(), Y_plus.end());
+  const size_t F_MRO = p.U.size() + add_max + sub_max;
+  const size_t F_PSI = p.U.size() + sub_max;
 
-  uint32_t p0_qsz = RecvUint32(ctx, "p0_qsz");
-  SendUint32(ctx, uint32_t(query.size()), "p1_qsz");
+  // P1 queries: (peer_excl \ Y_plus) ∪ Y_plus ∪ Y_minus, padded with
+  // random dummies outside U_{i-1} to the fixed size F_MRO.
+  std::set<Element> yp_set(Y_plus.begin(), Y_plus.end());
+  ElemSet excl_no_plus;
+  for (auto e : p.peer_excl)
+    if (!yp_set.count(e)) excl_no_plus.push_back(e);
+
+  ElemSet query = excl_no_plus;
+  query.insert(query.end(), Y_plus.begin(), Y_plus.end());
+  query.insert(query.end(), Y_minus.begin(), Y_minus.end());
+  AppendDummies(query, F_MRO, p.U);
 
   auto fut_r = std::async(std::launch::async, [&]() {
     return MROPRF_Receiver(ctx, query, p.ec);
   });
   auto fut_s = std::async(std::launch::async, [&]() {
-    MROPRF_Sender(ctx, p0_qsz, p.sk, p.ec);  // P1 uses k1 as sender key
+    MROPRF_Sender(ctx, F_MRO, p.sk, p.ec);  // P1 uses k1 as sender key
   });
   auto vals = fut_r.get(); fut_s.get();
 
+  // Parse: excl | own_add | own_del | dummies
+  const size_t n1 = excl_no_plus.size();
+  const size_t n2 = Y_plus.size();
+  const size_t n3 = Y_minus.size();
   p.prf_peer_excl.clear();
   p.prf_own_add.clear();
-  for (size_t i = 0; i < p.peer_excl.size(); ++i)
-    p.prf_peer_excl.push_back(RaiseToKey(vals[i], p.sk, p.ec));
-  for (size_t i = 0; i < Y_plus.size(); ++i)
-    p.prf_own_add.push_back(
-        RaiseToKey(vals[p.peer_excl.size() + i], p.sk, p.ec));
+  p.prf_own_del.clear();
+  for (size_t i = 0; i < n1; ++i)
+    p.prf_peer_excl.push_back(RaiseToKey(vals[i], p.sk, p.ec));  // ^{k1} → F
+  for (size_t i = 0; i < n2; ++i)
+    p.prf_own_add.push_back(RaiseToKey(vals[n1 + i], p.sk, p.ec));
+  for (size_t i = 0; i < n3; ++i)
+    p.prf_own_del.push_back(RaiseToKey(vals[n1 + n2 + i], p.sk, p.ec));
 
-  // ────── Deletion ──────
-  // Step 1 (sym): P1 ← P0  F_{k0}(X_i^-)
-  PRFSet fk0_Xm = RecvPRFVec(ctx, "d_k0xm");
-  p.prf_peer_del.clear();
-  for (const auto& v : fk0_Xm)
-    p.prf_peer_del.push_back(RaiseToKey(v, p.sk, p.ec));  // ^{k1} → F(X_i^-)
+  // ────── Deletion: single symmetric PSI ──────
+  PRFSet psi_in = p.prf_peer_excl;
+  psi_in.insert(psi_in.end(), p.prf_own_del.begin(), p.prf_own_del.end());
+  const size_t n_dummy = F_PSI - psi_in.size();
+  for (size_t i = 0; i < n_dummy; ++i)
+    psi_in.push_back(RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec));
 
-  // Step 2 (sym): P1 → P0  F_{k1}(Y_i^-)
-  PRFSet fk1_Ym;
-  for (auto y : Y_minus)
-    fk1_Ym.push_back(ComputeSinglePRF(y, p.sk, p.ec));
-  SendPRFVec(ctx, fk1_Ym, "d_k1ym");
-
-  // Step 3: F(D_Y) = F(peer_excl) ∩ F(X_i^-)
-  p.prf_D_own = PRF_Intersect(p.prf_peer_excl, p.prf_peer_del);
-
-  // Step 5: PSI(F(X_i^-), F(Y_i^-)) → F(X_i^- ∩ Y_i^-)
-  uint32_t psi_sz0 = RecvUint32(ctx, "d_psz0");
-  ElemSet psi_p1 = HashPRFSet(p.prf_peer_del);
-  // DEBUG: print first 3 hashes to compare with P0
-  std::cerr << "[P1] prf_peer_del[0..2] hashes: ";
-  for (int kk = 0; kk < 3 && kk < (int)psi_p1.size(); ++kk)
-    std::cerr << psi_p1[kk] << " ";
-  std::cerr << "\n";
-  SendUint32(ctx, uint32_t(psi_p1.size()), "d_psz1");
-  size_t psi_max = std::max(size_t(psi_sz0), psi_p1.size());
-
-  PRFSet prf_Xi_cap_Yi;
-  if (psi_max > 0) {
-    okvs::Baxos psi_bx = MakeBaxos(psi_max);
+  ElemSet psi_p1 = HashPRFSet(psi_in);
+  p.prf_U_minus.clear();
+  if (F_PSI > 0) {
+    okvs::Baxos psi_bx = MakeBaxos(F_PSI);
     auto fut_psi = std::async(std::launch::async, [&]() {
       return rr22::RR22PsiSend(ctx, psi_p1, psi_bx);
     });
-    prf_Xi_cap_Yi = UnhashPRFSet(fut_psi.get(), p.prf_peer_del);
+    p.prf_U_minus = UnhashPRFSet(fut_psi.get(), psi_in);
   }
-
-  // Step 6-7: Exchange F(D_Y) ↔ F(D_X)
-  SendPRFVec(ctx, p.prf_D_own, "d_dy");
-  PRFSet prf_DX = RecvPRFVec(ctx, "d_dx");
-
-  // Step 8: F(U_i^-)
-  std::set<PRFVal> u_set = ToSet(prf_Xi_cap_Yi);
-  for (const auto& v : prf_DX) u_set.insert(v);
-  for (const auto& v : p.prf_D_own) u_set.insert(v);
-  p.prf_U_minus = {u_set.begin(), u_set.end()};
 
   // ────── Addition ──────
   // Step 1: P1 → P0  F_{k1}(U_{i-1})
@@ -505,8 +497,13 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
   // Step 3: ← P0  F(U_{i-1}\U_i^- ∪ X_i^+)
   PRFSet f_partial = RecvPRFVec(ctx, "a_part");
 
-  // Step 4: add F(Y_i^+), strip k1 → F_{k0}(U_i)
-  for (const auto& v : p.prf_own_add) f_partial.push_back(v);
+  // Step 4: add F(Y_i^+), dedupe (a collision element may already be in
+  // F(U_{i-1}\U_i^-)), strip k1 → F_{k0}(U_i)
+  {
+    std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
+    for (const auto& v : p.prf_own_add) fpart_set.insert(v);
+    f_partial.assign(fpart_set.begin(), fpart_set.end());
+  }
 
   PRFSet fk0_Ui;
   for (const auto& v : f_partial)
