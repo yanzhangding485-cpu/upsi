@@ -383,7 +383,29 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
     f_partial.assign(fpart_set.begin(), fpart_set.end());
   }
 
-  // Step 3: → P1  F(U_{i-1}\U_i^- ∪ X_i^+)
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+
+  // Step 3: pad f_partial to the public size T_part = |U_{i-1}| - |U_i^-|
+  // + add_max with random dummy points. The padding hides |X_i^+ ∩ Y_i^+|,
+  // which would otherwise leak through the message length: P1 could derive
+  // it from this length together with |U_{i-1}|, |U_i^-|, |Y_i^+| and the
+  // public net addition count. Dummies are never raised by the parties'
+  // keys, so the lookups in the unmapped-pass fail and they are dropped
+  // before entering U_i.
+  const size_t T_part = p.U.size() - p.prf_U_minus.size() + add_max;
+  std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
+  while (f_partial.size() < T_part) {
+    uint64_t hi = gen();
+    uint64_t lo = gen();
+    Element r = (static_cast<uint128_t>(hi) << 64) | lo;
+    PRFVal d = HashToCurve(r, p.ec);
+    if (fpart_set.count(d)) continue;
+    fpart_set.insert(d);
+    f_partial.push_back(d);
+  }
+
+  // Step 3: send F(U_{i-1} minus U_i^- plus X_i^+) padded to T_part
   SendPRFVec(ctx, f_partial, "a_part");
 
   // Step 5: ← P1  F_{k0}(U_i)
@@ -402,6 +424,23 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
     else unmapped.push_back(h);
   }
 
+  // Step 7: pad unmapped to the public size T_unm = 2 * add_max with
+  // random points (P1's plaintext lookup fails on them, so they are
+  // dropped). Without this padding the unmapped length would leak the
+  // same |X_i^+ ∩ Y_i^+| quantity as an unpadded a_part length.
+  const size_t T_unm = 2 * add_max;
+  {
+    std::set<PRFVal> um_set(unmapped.begin(), unmapped.end());
+    while (unmapped.size() < T_unm) {
+      uint64_t hi = gen();
+      uint64_t lo = gen();
+      Element r = (static_cast<uint128_t>(hi) << 64) | lo;
+      PRFVal d = HashToCurve(r, p.ec);
+      if (um_set.count(d)) continue;
+      um_set.insert(d);
+      unmapped.push_back(d);
+    }
+  }
   // Step 7-8: resolve unmapped (Y_i^+)
   SendPRFVec(ctx, unmapped, "a_unm");
   ElemSet peer_pl = RecvElemVec(ctx, "a_ppl");
