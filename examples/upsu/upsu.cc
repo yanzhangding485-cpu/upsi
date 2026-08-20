@@ -350,11 +350,34 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
 
   // ────── Deletion: single symmetric PSI ──────
   // P0's padded input: F((Y\\X)\\X_i^+) ∪ F(X_i^-) ∪ dummies, size F_PSI.
-  PRFSet psi_in = p.prf_peer_excl;
-  psi_in.insert(psi_in.end(), p.prf_own_del.begin(), p.prf_own_del.end());
+  // Set union, not concatenation: a wrapped deletion window can re-select
+  // an element that was deleted in an earlier round and now lives in the
+  // peer-exclusive set. Without dedup the same PRF value would enter the
+  // OKVS twice and crash the Paxos solver with duplicate keys.
+  PRFSet psi_in;
+  {
+    std::set<PRFVal> psi_set;
+    for (const auto& v : p.prf_peer_excl)
+      if (psi_set.insert(v).second) psi_in.push_back(v);
+    for (const auto& v : p.prf_own_del)
+      if (psi_set.insert(v).second) psi_in.push_back(v);
+  }
+  // Padding: F_PSI - |set| dummy F-values from the Preprocess dummy pool.
+  // If dedup shrank the union, the pool runs short; overflow entries are
+  // re-raised pool images (one extra secret-key exponentiation keeps them
+  // outside both parties' sets).
   const size_t n_dummy = F_PSI - psi_in.size();
-  for (size_t i = 0; i < n_dummy; ++i)
-    psi_in.push_back(RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec));
+  const size_t n_pool = vals.size() - n1 - n2 - n3;
+  for (size_t i = 0; i < n_dummy; ++i) {
+    PRFVal d;
+    if (i < n_pool) {
+      d = RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec);
+    } else {
+      d = RaiseToKey(vals[n1 + n2 + n3 + (i - n_pool)], p.sk, p.ec);
+      d = RaiseToKey(d, p.sk, p.ec);
+    }
+    psi_in.push_back(d);
+  }
 
   ElemSet psi_p0 = HashPRFSet(psi_in);
   p.prf_U_minus.clear();
@@ -366,87 +389,85 @@ ElemSet UpdateRoundP0(const std::shared_ptr<yacl::link::Context>& ctx,
     p.prf_U_minus = UnhashPRFSet(fut_psi.get(), psi_in);
   }
 
-  // ────── Addition (blind) ──────
-  // Step 1: P1 → P0  F_{k1}(U_{i-1})
-  PRFSet fk1_Uprev = RecvPRFVec(ctx, "a_k1u");
-  PRFSet f_Uprev;
-  for (const auto& v : fk1_Uprev)
-    f_Uprev.push_back(RaiseToKey(v, p.sk, p.ec));
-
-  // Remove F(U_i^-), add F(X_i^+). Use a set to avoid duplicates:
-  // a collision element (in U_{i-1} and re-added in X_i^+) appears once.
-  std::set<PRFVal> u_set = ToSet(p.prf_U_minus);
-  PRFSet f_partial = PRF_Diff(f_Uprev, u_set);
-  {
-    std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
-    for (const auto& v : p.prf_own_add) fpart_set.insert(v);
-    f_partial.assign(fpart_set.begin(), fpart_set.end());
-  }
+  // ────── Addition ──────
+  // Step 1: → P1  F_{k0}(U_{i-1}), then add_max blank values H(b)^{k0}
+  // with b outside U_{i-1}. P1 forwards the blanks as size padding when
+  // building the masked set below.
+  PRFSet fk0_Uprev;
+  for (auto u : p.U)
+    fk0_Uprev.push_back(ComputeSinglePRF(u, p.sk, p.ec));
+  SendPRFVec(ctx, fk0_Uprev, "a_fk0u");
 
   std::random_device rd;
   std::mt19937_64 gen(rd());
-
-  // Step 3: pad f_partial to the public size T_part = |U_{i-1}| - |U_i^-|
-  // + add_max with random dummy points. The padding hides |X_i^+ ∩ Y_i^+|,
-  // which would otherwise leak through the message length: P1 could derive
-  // it from this length together with |U_{i-1}|, |U_i^-|, |Y_i^+| and the
-  // public net addition count. Dummies are never raised by the parties'
-  // keys, so the lookups in the unmapped-pass fail and they are dropped
-  // before entering U_i.
-  const size_t T_part = p.U.size() - p.prf_U_minus.size() + add_max;
-  std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
-  while (f_partial.size() < T_part) {
+  std::set<Element> u_plain(p.U.begin(), p.U.end());
+  PRFSet blanks;
+  while (blanks.size() < add_max) {
     uint64_t hi = gen();
     uint64_t lo = gen();
     Element r = (static_cast<uint128_t>(hi) << 64) | lo;
-    PRFVal d = HashToCurve(r, p.ec);
-    if (fpart_set.count(d)) continue;
-    fpart_set.insert(d);
-    f_partial.push_back(d);
+    if (u_plain.count(r)) continue;
+    blanks.push_back(ComputeSinglePRF(r, p.sk, p.ec));
+  }
+  SendPRFVec(ctx, blanks, "a_blanks");
+
+  // Step 2: ← P1  S1 = F_{k0}(U_{i-1} minus U_i^-) ∪ {H(y)^{k0 r'}}
+  // ∪ blanks, of the public size |U_{i-1}| - |U_i^-| + add_max.
+  PRFSet s1 = RecvPRFVec(ctx, "a_s1");
+  YACL_ENFORCE(s1.size() == p.U.size() - p.prf_U_minus.size() + add_max);
+
+  // Step 3: ← P1  two OKVS instances of capacity add_max (public size
+  // and seed): one stores the plaintext of each Y_i^+ element, the other
+  // a tag of F_{k0}(y). Decoding is local, so P1 learns nothing about
+  // which elements P0 can map.
+  okvs::Baxos bx1 = MakeBaxos(add_max);
+  okvs::Baxos bx2 = MakeBaxos(add_max);
+  std::vector<uint128_t> okvs1(bx1.size()), okvs2(bx2.size());
+  if (add_max > 0) {
+    auto raw1 = ctx->Recv(ctx->PrevRank(), "a_okvs1");
+    auto raw2 = ctx->Recv(ctx->PrevRank(), "a_okvs2");
+    YACL_ENFORCE(raw1.size() == int64_t(bx1.size() * sizeof(uint128_t)));
+    YACL_ENFORCE(raw2.size() == int64_t(bx2.size() * sizeof(uint128_t)));
+    std::memcpy(okvs1.data(), raw1.data(), raw1.size());
+    std::memcpy(okvs2.data(), raw2.data(), raw2.size());
   }
 
-  // Step 3: send F(U_{i-1} minus U_i^- plus X_i^+) padded to T_part
-  SendPRFVec(ctx, f_partial, "a_part");
-
-  // Step 5: ← P1  F_{k0}(U_i)
-  PRFSet fk0_Ui = RecvPRFVec(ctx, "a_k0u");
-
-  // Step 6: Strip k0 → H(U_i), map to plaintext
+  // Step 4: strip k0 → H and map via U_{i-1} (surviving elements). The
+  // unmapped values are queried against the OKVS pair with their raw
+  // (unstripped) form, since the OKVS keys are the r'-blinded images. A
+  // decoded pair is accepted iff the tag matches F_{k0}(y); for a blank
+  // query this fails with probability 2^{-128} and the element is dropped.
   std::map<PRFVal, Element> htab = BuildHashLookup(p.U, p.ec);
-  for (auto x : X_plus) htab[HashToCurve(x, p.ec)] = x;
-
   ElemSet Ui_new;
-  PRFSet unmapped;
-  for (const auto& v : fk0_Ui) {
+  std::vector<uint128_t> qkeys;
+  for (const auto& v : s1) {
     auto h = StripKey(v, p.skinv, p.ec);
     auto it = htab.find(h);
-    if (it != htab.end()) Ui_new.push_back(it->second);
-    else unmapped.push_back(h);
-  }
-
-  // Step 7: pad unmapped to the public size T_unm = 2 * add_max with
-  // random points (P1's plaintext lookup fails on them, so they are
-  // dropped). Without this padding the unmapped length would leak the
-  // same |X_i^+ ∩ Y_i^+| quantity as an unpadded a_part length.
-  const size_t T_unm = 2 * add_max;
-  {
-    std::set<PRFVal> um_set(unmapped.begin(), unmapped.end());
-    while (unmapped.size() < T_unm) {
-      uint64_t hi = gen();
-      uint64_t lo = gen();
-      Element r = (static_cast<uint128_t>(hi) << 64) | lo;
-      PRFVal d = HashToCurve(r, p.ec);
-      if (um_set.count(d)) continue;
-      um_set.insert(d);
-      unmapped.push_back(d);
+    if (it != htab.end()) {
+      Ui_new.push_back(it->second);
+    } else {
+      qkeys.push_back(HashPRFToUint128(v));
     }
   }
-  // Step 7-8: resolve unmapped (Y_i^+)
-  SendPRFVec(ctx, unmapped, "a_unm");
-  ElemSet peer_pl = RecvElemVec(ctx, "a_ppl");
-  Ui_new.insert(Ui_new.end(), peer_pl.begin(), peer_pl.end());
+  if (!qkeys.empty()) {
+    std::vector<uint128_t> y_dec(qkeys.size()), tag_dec(qkeys.size());
+    bx1.Decode(absl::MakeSpan(qkeys), absl::MakeSpan(y_dec),
+               absl::MakeSpan(okvs1), 8);
+    bx2.Decode(absl::MakeSpan(qkeys), absl::MakeSpan(tag_dec),
+               absl::MakeSpan(okvs2), 8);
+    for (size_t i = 0; i < qkeys.size(); ++i) {
+      PRFVal fk0_y = ComputeSinglePRF(y_dec[i], p.sk, p.ec);
+      if (tag_dec[i] != HashPRFToUint128(fk0_y)) continue;
+      Ui_new.push_back(y_dec[i]);  // Y_i^+ minus X_i^+, output-derivable
+    }
+  }
 
-  // Step 9: → P1  final U_i
+  // Step 5: add own X_i^+ locally (P1 never sees it) and send final U_i.
+  {
+    std::set<Element> ui_set(Ui_new.begin(), Ui_new.end());
+    for (auto x : X_plus) ui_set.insert(x);
+    Ui_new.assign(ui_set.begin(), ui_set.end());
+  }
   SendElemVec(ctx, Ui_new, "a_uf");
 
   // Update state: X_i = (X_{i-1} \ X_i^-) ∪ X_i^+
@@ -510,11 +531,34 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
     p.prf_own_del.push_back(RaiseToKey(vals[n1 + n2 + i], p.sk, p.ec));
 
   // ────── Deletion: single symmetric PSI ──────
-  PRFSet psi_in = p.prf_peer_excl;
-  psi_in.insert(psi_in.end(), p.prf_own_del.begin(), p.prf_own_del.end());
+  // Set union, not concatenation: a wrapped deletion window can re-select
+  // an element that was deleted in an earlier round and now lives in the
+  // peer-exclusive set. Without dedup the same PRF value would enter the
+  // OKVS twice and crash the Paxos solver with duplicate keys.
+  PRFSet psi_in;
+  {
+    std::set<PRFVal> psi_set;
+    for (const auto& v : p.prf_peer_excl)
+      if (psi_set.insert(v).second) psi_in.push_back(v);
+    for (const auto& v : p.prf_own_del)
+      if (psi_set.insert(v).second) psi_in.push_back(v);
+  }
+  // Padding: F_PSI - |set| dummy F-values from the Preprocess dummy pool.
+  // If dedup shrank the union, the pool runs short; overflow entries are
+  // re-raised pool images (one extra secret-key exponentiation keeps them
+  // outside both parties' sets).
   const size_t n_dummy = F_PSI - psi_in.size();
-  for (size_t i = 0; i < n_dummy; ++i)
-    psi_in.push_back(RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec));
+  const size_t n_pool = vals.size() - n1 - n2 - n3;
+  for (size_t i = 0; i < n_dummy; ++i) {
+    PRFVal d;
+    if (i < n_pool) {
+      d = RaiseToKey(vals[n1 + n2 + n3 + i], p.sk, p.ec);
+    } else {
+      d = RaiseToKey(vals[n1 + n2 + n3 + (i - n_pool)], p.sk, p.ec);
+      d = RaiseToKey(d, p.sk, p.ec);
+    }
+    psi_in.push_back(d);
+  }
 
   ElemSet psi_p1 = HashPRFSet(psi_in);
   p.prf_U_minus.clear();
@@ -527,44 +571,76 @@ ElemSet UpdateRoundP1(const std::shared_ptr<yacl::link::Context>& ctx,
   }
 
   // ────── Addition ──────
-  // Step 1: P1 → P0  F_{k1}(U_{i-1})
-  PRFSet fk1_Uprev;
-  for (auto u : p.U)
-    fk1_Uprev.push_back(ComputeSinglePRF(u, p.sk, p.ec));
-  SendPRFVec(ctx, fk1_Uprev, "a_k1u");
+  // Step 1: ← P0  F_{k0}(U_{i-1}) and add_max blanks.
+  PRFSet fk0_Uprev = RecvPRFVec(ctx, "a_fk0u");
+  PRFSet blanks = RecvPRFVec(ctx, "a_blanks");
+  YACL_ENFORCE(fk0_Uprev.size() == p.U.size());
+  YACL_ENFORCE(blanks.size() == add_max);
 
-  // Step 3: ← P0  F(U_{i-1}\U_i^- ∪ X_i^+)
-  PRFSet f_partial = RecvPRFVec(ctx, "a_part");
+  // Step 2: drop F_{k0}(U_i^-) (strip k1 from the PSI output F(U_i^-)),
+  // append Y_i^+ images blinded by a fresh r', and pad with blanks to the
+  // public size |U_{i-1}| - |U_i^-| + add_max. The r'-blinding prevents
+  // P0 from testing its own additions against this set.
+  yc::MPInt rp;
+  yc::MPInt::RandomLtN(p.ec->GetOrder(), &rp);
+  std::set<PRFVal> uminus_k0;
+  for (const auto& v : p.prf_U_minus)
+    uminus_k0.insert(StripKey(v, p.skinv, p.ec));
+  PRFSet s1;
+  for (const auto& v : fk0_Uprev)
+    if (!uminus_k0.count(v)) s1.push_back(v);
+  PRFSet masked_add;
+  for (const auto& v : p.prf_own_add)
+    masked_add.push_back(RaiseToKey(StripKey(v, p.skinv, p.ec), rp, p.ec));
+  s1.insert(s1.end(), masked_add.begin(), masked_add.end());
+  const size_t nb = add_max - Y_plus.size();
+  s1.insert(s1.end(), blanks.begin(), blanks.begin() + nb);
+  SendPRFVec(ctx, s1, "a_s1");
 
-  // Step 4: add F(Y_i^+), dedupe (a collision element may already be in
-  // F(U_{i-1}\U_i^-)), strip k1 → F_{k0}(U_i)
+  // Step 3: encode two OKVS instances of capacity add_max (public size
+  // and seed). Keys are the r'-blinded images; values are the plaintext
+  // y and a tag of F_{k0}(y). Dummy pairs fill the capacity, so P0 cannot
+  // tell the number of real additions. P0 decodes locally, so P1 learns
+  // nothing about which of its additions were mapped.
+  std::vector<uint128_t> keys, val_y, val_tag;
+  for (size_t i = 0; i < Y_plus.size(); ++i) {
+    keys.push_back(HashPRFToUint128(masked_add[i]));
+    val_y.push_back(Y_plus[i]);
+    val_tag.push_back(
+        HashPRFToUint128(StripKey(p.prf_own_add[i], p.skinv, p.ec)));
+  }
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
   {
-    std::set<PRFVal> fpart_set(f_partial.begin(), f_partial.end());
-    for (const auto& v : p.prf_own_add) fpart_set.insert(v);
-    f_partial.assign(fpart_set.begin(), fpart_set.end());
+    std::set<uint128_t> key_set(keys.begin(), keys.end());
+    while (keys.size() < add_max) {
+      uint64_t hi = gen();
+      uint64_t lo = gen();
+      uint128_t k = (static_cast<uint128_t>(hi) << 64) | lo;
+      if (key_set.count(k)) continue;
+      key_set.insert(k);
+      keys.push_back(k);
+      val_y.push_back((static_cast<uint128_t>(gen()) << 64) | gen());
+      val_tag.push_back((static_cast<uint128_t>(gen()) << 64) | gen());
+    }
   }
-
-  PRFSet fk0_Ui;
-  for (const auto& v : f_partial)
-    fk0_Ui.push_back(StripKey(v, p.skinv, p.ec));  // F(Y_i^+ included)
-
-  // Step 5: → P0  F_{k0}(U_i)
-  SendPRFVec(ctx, fk0_Ui, "a_k0u");
-
-  // Step 7: ← P0  unmapped H values
-  PRFSet unmapped = RecvPRFVec(ctx, "a_unm");
-
-  // Step 8: map unmapped H → Y_plus (and current Y) plaintext
-  std::map<PRFVal, Element> htab;
-  for (auto y : Y_plus) htab[HashToCurve(y, p.ec)] = y;
-  for (auto y : p.X)   htab[HashToCurve(y, p.ec)] = y;
-
-  ElemSet peer_pl;
-  for (const auto& h : unmapped) {
-    auto it = htab.find(h);
-    if (it != htab.end()) peer_pl.push_back(it->second);
+  okvs::Baxos bx1 = MakeBaxos(add_max);
+  okvs::Baxos bx2 = MakeBaxos(add_max);
+  std::vector<uint128_t> okvs1(bx1.size()), okvs2(bx2.size());
+  if (add_max > 0) {
+    bx1.Solve(absl::MakeSpan(keys), absl::MakeSpan(val_y),
+              absl::MakeSpan(okvs1), nullptr, 8);
+    bx2.Solve(absl::MakeSpan(keys), absl::MakeSpan(val_tag),
+              absl::MakeSpan(okvs2), nullptr, 8);
+    ctx->SendAsync(ctx->NextRank(),
+                   yacl::ByteContainerView(okvs1.data(),
+                                           okvs1.size() * sizeof(uint128_t)),
+                   "a_okvs1");
+    ctx->SendAsync(ctx->NextRank(),
+                   yacl::ByteContainerView(okvs2.data(),
+                                           okvs2.size() * sizeof(uint128_t)),
+                   "a_okvs2");
   }
-  SendElemVec(ctx, peer_pl, "a_ppl");
 
   // Step 10: ← P0  final U_i
   ElemSet Ui_new = RecvElemVec(ctx, "a_uf");

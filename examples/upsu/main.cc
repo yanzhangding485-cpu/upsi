@@ -6,6 +6,7 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -43,7 +44,7 @@ struct TestData {
 TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
                             double overlap_ratio = 0.5, bool collide = false) {
   // X = [0 .. n-1]
-  // Y = [n/2 .. 3n/2-1]  → overlap = n/2 (range [n/2, n-1] in both sets)
+  // Y = [n/2 .. 3n/2-1]  ->  overlap = n/2 (range [n/2, n-1] in both sets)
   TestData d;
   d.X = MakeSet(0, n);
   d.Y = MakeSet(n / 2, n);
@@ -56,40 +57,88 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
   set<Element> Y_cur(d.Y.begin(), d.Y.end());
   set<Element> U_cur = u0;
 
-  // Safe offset range: overlap is [n/2, n-1], need room for sub_n elements
-  size_t sub_space = n / 2 - sub_n - 1;
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+
+  // Pick k distinct random elements from pool (rejection via set).
+  auto pick = [&gen](const ElemSet& pool, size_t k) {
+    ElemSet out;
+    std::set<Element> seen;
+    while (out.size() < k) {
+      size_t idx = static_cast<size_t>(gen()) % pool.size();
+      if (seen.insert(pool[idx]).second) out.push_back(pool[idx]);
+    }
+    return out;
+  };
 
   for (size_t r = 0; r < rounds; ++r) {
-    size_t add_base = (r + 2) * n + add_n;
-    size_t sub_off  = sub_space > 0 ? ((r * sub_n) % sub_space) : 0;
-
     ElemSet xp, xm, yp, ym;
 
-    // X additions: fresh elements, disjoint from X_cur
-    xp = MakeSet(add_base, add_n);
+    // Additions: fresh random elements, disjoint from own current set.
+    // Cross-party intersections are left to randomness (prob ~ nu^2/2^128),
+    // so in the natural model additions never enter X&Y (intersection).
+    {
+      std::set<Element> xcur_set(X_cur.begin(), X_cur.end());
+      while (xp.size() < add_n) {
+        uint64_t hi = gen(); uint64_t lo = gen();
+        Element x = (static_cast<uint128_t>(hi) << 64) | lo;
+        if (!xcur_set.count(x)) { xcur_set.insert(x); xp.push_back(x); }
+      }
+    }
+    {
+      std::set<Element> ycur_set(Y_cur.begin(), Y_cur.end());
+      while (yp.size() < add_n) {
+        uint64_t hi = gen(); uint64_t lo = gen();
+        Element y = (static_cast<uint128_t>(hi) << 64) | lo;
+        if (!ycur_set.count(y)) { ycur_set.insert(y); yp.push_back(y); }
+      }
+    }
 
-    // X deletions: from the overlap region [n/2, n-1]  (present in both X and Y)
-    for (size_t i = 0; i < sub_n; ++i)
-      xm.push_back(static_cast<uint128_t>(n / 2 + sub_off + i));
+    // Deletions: sampled from the CURRENT sets (base elements plus elements
+    // added in earlier rounds), never re-selected (membership in the current
+    // set already excludes everything deleted before).
+    //   J   = overlap_n joint deletions from X&Y (same batch on both sides)
+    //   D_X = remaining deletions from E_X = X\Y (own exclusives, includes
+    //         elements that X added in earlier rounds)
+    //   D_Y = remaining deletions from E_Y = Y\X (symmetric)
+    // Additions never enter the intersection, so X&Y only drains at
+    // overlap_n per round. When it can no longer supply overlap_n, the
+    // shortfall moves to the exclusive parts (adaptive J): both sides still
+    // delete sub_n fresh elements, and |U| growth slows accordingly.
+    ElemSet inter, e_x, e_y;
+    {
+      std::set<Element> yset(Y_cur.begin(), Y_cur.end());
+      for (auto x : X_cur) {
+        if (yset.count(x)) inter.push_back(x);
+        else e_x.push_back(x);
+      }
+      for (auto y : Y_cur)
+        if (!X_cur.count(y)) e_y.push_back(y);
+    }
+    const size_t overlap_n = static_cast<size_t>(sub_n * overlap_ratio);
+    const size_t j_eff = (overlap_n < inter.size()) ? overlap_n : inter.size();
+    const size_t d_size = sub_n - j_eff;
+    if (d_size > e_x.size() || d_size > e_y.size()) {
+      std::cerr << "GenerateTestData: exclusive pool exhausted at round "
+                << r << " (sub_n too large for n)" << std::endl;
+      std::exit(1);
+    }
 
-    // Y additions: fresh elements, disjoint from Y_cur
-    size_t y_add_base = add_base + add_n;
-    yp = MakeSet(y_add_base, add_n);
+    ElemSet j_vec = pick(inter, j_eff);
+    ElemSet dx_vec = pick(e_x, d_size);
+    ElemSet dy_vec = pick(e_y, d_size);
+    for (auto x : j_vec) { xm.push_back(x); ym.push_back(x); }
+    xm.insert(xm.end(), dx_vec.begin(), dx_vec.end());
+    ym.insert(ym.end(), dy_vec.begin(), dy_vec.end());
 
-    // Y deletions: overlap_n elements same as X (for PSI), rest from Y's
-    // exclusive part [n, 3n/2-1]
-    size_t overlap_n = static_cast<size_t>(sub_n * overlap_ratio);
-    for (size_t i = 0; i < overlap_n; ++i)
-      ym.push_back(static_cast<uint128_t>(n / 2 + sub_off + i));
-    for (size_t i = overlap_n; i < sub_n; ++i)
-      ym.push_back(static_cast<uint128_t>(n + sub_off + (i - overlap_n)));
-
-    // Collision mode: one party deletes an exclusive element while the
-    // other re-adds it in the same round (D_X∩X_i^+ and D_Y∩Y_i^+).
-    if (collide && sub_n >= 1 && add_n >= 1) {
-      xp[0] = ym.back();                        // X adds Y's exclusive deletion
-      xm[0] = static_cast<uint128_t>(sub_off);  // X deletes its exclusive element
-      yp[0] = static_cast<uint128_t>(sub_off);  // Y re-adds it
+    // Collision mode: force the improbable corner cases.
+    //   xp[0] = a D_Y element : D_Y & X_i^+  (X re-adds what Y deletes)
+    //   yp[0] = a D_X element : D_X & Y_i^+  (Y re-adds what X deletes)
+    //   yp[1] = xp[1]         : joint addition X_i^+ & Y_i^+
+    if (collide && !dx_vec.empty() && !dy_vec.empty()) {
+      xp[0] = dy_vec.back();
+      yp[0] = dx_vec.back();
+      if (add_n >= 2) yp[1] = xp[1];
     }
 
     d.X_plus.push_back(xp);
@@ -98,15 +147,13 @@ TestData GenerateTestData(size_t n, size_t add_n, size_t sub_n, size_t rounds,
     d.Y_minus.push_back(ym);
 
     // Update ground truth
-    for (auto x : xm) { X_cur.erase(x); }
-    for (auto y : ym) { Y_cur.erase(y); }
-    for (auto x : xp) { X_cur.insert(x); U_cur.insert(x); }
-    for (auto y : yp) { Y_cur.insert(y); U_cur.insert(y); }
-    // Recompute U properly
+    for (auto x : xm) X_cur.erase(x);
+    for (auto y : ym) Y_cur.erase(y);
+    for (auto x : xp) X_cur.insert(x);
+    for (auto y : yp) Y_cur.insert(y);
     U_cur.clear();
     U_cur.insert(X_cur.begin(), X_cur.end());
     U_cur.insert(Y_cur.begin(), Y_cur.end());
-
     d.U_gt.push_back(ElemSet(U_cur.begin(), U_cur.end()));
   }
 
